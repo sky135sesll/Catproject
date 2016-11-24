@@ -1,0 +1,266 @@
+#Test Ok
+#
+import RPi.GPIO as GPIO
+import time, thread
+import json
+import threading
+import socket
+
+GPIO.setmode(GPIO.BCM)
+
+#Lock setting
+lock= threading.Lock()
+
+#socket setting
+HOST = '0.0.0.0'
+PORT = 50007
+
+#trig and echo pin setting
+trigIn = 17
+echoIn = 27
+trigOut = 20
+echoOut = 21
+
+#read json file
+def readJson() :
+    jsonFile = open("temp.json", 'r')
+    jsonStr = json.loads(jsonFile.read())
+    jsonFile.close()
+    return jsonStr
+
+#write json file
+def writeJson(data) :
+    jsonFile = open("temp.json", 'w')
+    jsonStr = jsonFile.write(data)
+    jsonFile.close()
+
+def cmpData(value, temp) :
+    #before position
+    beforeDistance = temp - (temp / 10)
+    #print "before : " + str(beforeDistance)
+    #cmp to data
+    if value < beforeDistance :
+        #my position is small then temp distance
+        return 1
+    else :
+        return 0
+
+def JsonStr(type) :
+    #Origin file save json data
+    tempJson = readJson()
+    #json data array
+    data = {}
+    event = {}
+
+    now = time.localtime()
+    event['date'] = "%04d-%02d-%02d %02d:%02d:%02d" % (now.tm_year, now.tm_mon, now.tm_mday, now.tm_hour, now.tm_min, now.tm_sec)
+    event['type'] = type
+
+    i = 0
+    while True :
+        try :
+            tempEvent = tempJson[str(i)]
+            data[i] = tempEvent
+        except KeyError :
+	    if i > 200 :
+	        jsonFile = open("temp.json", 'w')
+            jsonStr = jsonFile.write("{ \"0\" : { \"date\"  : \"2016-09-26 12:00:00\",\"type\" : \"in\" }}")
+	        data = -1
+            else :
+                data[i] = event
+            break
+        i += 1
+    
+    return data
+
+def getData():
+    #Origin file save json data
+    tempJson = readJson()
+    #json data array
+    data = {}
+    event = {}
+    i = 0
+    while True :
+        try :
+            tempEvent = tempJson[str(i)]
+            data[i] = tempEvent
+        except KeyError :
+            break
+        i += 1
+    
+    encodeData = json.dumps(data, sort_keys=True, indent=4)
+    return encodeData
+
+def readHc04(trig, echo) :
+    #trig pin start
+    GPIO.output(trig, False)
+    time.sleep(0.05)
+    GPIO.output(trig, True)
+    time.sleep(0.000001)
+    GPIO.output(trig, False)
+    #echo pin start
+    while GPIO.input(echo) == 0 :
+        pulse_start = time.time()
+
+    while GPIO.input(echo) == 1 :
+        pulse_end = time.time()
+    #read data and convert cm
+    pulse_duration = pulse_end - pulse_start
+    distance = pulse_duration * 17000
+    distance = round(distance, 2)
+    return distance
+
+#sensor start!!
+def mainThread(id) :
+    #pin state settig
+    GPIO.setup(trigIn, GPIO.OUT)
+    GPIO.setup(echoIn, GPIO.IN)
+    GPIO.setup(trigOut, GPIO.OUT)
+    GPIO.setup(echoOut, GPIO.IN)
+    
+    inCheck = 0
+    outCheck = 0
+
+    inTemp = 0
+    outTemp = 0
+    inCount = 0
+    outCount = 0
+    while True :
+        #print "Test"
+        inData = readHc04(trigIn, echoIn)
+        outData = readHc04(trigOut, echoOut)
+        #print "in : " + str(inData)
+        #print "out : " + str(outData)
+
+        #error
+        if  inData > 250 or inData < 0 :
+            continue
+        if  outData > 250 or outData < 0 :
+            continue
+        if inTemp == 0 or outTemp == 0 :
+            inTemp = inData
+            outTemp = outData
+
+        #print "indata : " + str(inData)
+        #print "outdata : " + str(outData)
+        #time.sleep(1)
+
+        #in or out Fix
+        if cmpData(inData, inTemp) == 1 :
+            #print "DEBUG : " + "if"
+            if inCheck == 0 :
+                print "DEBUG : " + "check in"
+                inCheck = 1
+            
+            if outCheck == 1 :
+                outCheck = 0
+                if inCheck == 1 :
+                    inCheck = 0
+
+                inCount = 0
+                outCount = 0
+                #Lock
+                lock.acquire()
+                data = JsonStr("out")
+		if data != -1 :
+                    writeJson(json.dumps(data, sort_keys=True, indent=4))
+                lock.release()
+                #End lock
+                print "=============="
+                print "Out"
+                print "=============="
+                time.sleep(0.3)
+
+        elif cmpData(outData, outTemp) == 1 :
+            #print "DEBUG : " + "if"
+            if outCheck == 0 :
+                print "DEBUG : " + "check out"
+                outCheck = 1
+            
+            if inCheck == 1 :
+                inCheck = 0
+                if outCheck == 1 :
+                    outCheck = 0
+                inCount = 0
+                outCount = 0
+                #lock
+                lock.acquire()
+                data = JsonStr("in")
+		if data != -1 :
+                    writeJson(json.dumps(data, sort_keys=True, indent=4))
+                lock.release()
+                #end lock
+                print "=============="
+                print "In"
+                print "=============="
+                time.sleep(0.3)
+        
+        if inCheck == 1 :
+            inCount += 1
+            if inCount == 30 :
+                print "in Remove"
+                inCheck = 0
+                inCount = 0
+        elif outCheck == 1 :
+            outCount += 1
+            if outCount == 30 :
+                print "out Remove"
+                outCheck = 0
+                outCount = 0
+            
+        #backup data
+        inTemp = inData
+        outTemp = outData
+
+    #END
+    GPIO.cleanup()
+
+def sockThread(id) :
+    #socket option setting
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind((HOST,PORT))
+    s.listen(5) 
+    while True :
+        conn, b = s.accept()
+        print "accpet!!"
+
+        #Lock
+        lock.acquire()
+        #data = readJson()
+        data = getData()
+	print "data is " + data
+	print "data length : " + str(len(str(data)))
+        length = str(len(str(data)))
+	
+	print "length : " + length
+	i = len(length)
+	print "len is " + str(i)
+        while i < 64 :
+            length += " "
+            i += 1
+	
+	print "length : " + str(length) + "a"
+        #data length and data send
+        conn.send(str(length).encode())
+	print data
+        conn.send(str(data).encode())
+
+        #json file reset
+        jsonFile = open("temp.json", 'w')
+        jsonStr = jsonFile.write("{ \"0\" : { \"date\"  : \"2016-09-26 12:00:00\",\"type\" : \"in\" }}")
+
+        conn.close()
+        jsonFile.close()
+        lock.release()
+        #End Lock
+
+def main() :
+    thread.start_new_thread(mainThread, (1,))
+    thread.start_new_thread(sockThread, (2,))
+
+    while True :
+        time.sleep(1)
+
+if __name__ == "__main__" :
+    main()
+
